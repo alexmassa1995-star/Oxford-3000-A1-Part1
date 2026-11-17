@@ -4,7 +4,7 @@
   python gen_audio.py test   -> 20 фраз всеми голосами в папку audio_test (послушать)
   python gen_audio.py all    -> всё в папку audio (можно прерывать и запускать снова)
 """
-import asyncio, hashlib, json, re, sys
+import asyncio, hashlib, json, re, shutil, sys
 from pathlib import Path
 import edge_tts
 
@@ -17,6 +17,8 @@ VOICES = {
 }
 WORD_VOICES = ["aria", "guy", "sonia", "ryan"]   # слова
 TEXT_VOICES = ["aria", "guy", "sonia", "ryan"]   # примеры, идиомы, времена, фразы
+FFMPEG = shutil.which("ffmpeg")           # если ffmpeg есть, файлы сжимаются (в 1.5 раза меньше)
+BITRATE = "32k"
 RATE = "-10%"                            # как rate=0.9 в приложении
 SAY = {"CD": "C D", "DVD": "D V D", "TV": "T V", "OK": "okay", "a, an": "a"}  # как в приложении
 
@@ -40,6 +42,23 @@ def load_texts():
 done = 0
 
 
+async def compress(tmp, f):
+    if not FFMPEG:
+        tmp.replace(f)
+        return
+    out = f.with_name(f.stem + ".part.mp3")
+    p = await asyncio.create_subprocess_exec(
+        FFMPEG, "-y", "-loglevel", "error", "-i", str(tmp),
+        "-ac", "1", "-ar", "24000", "-b:a", BITRATE, str(out))
+    await p.wait()
+    if p.returncode == 0 and out.exists() and out.stat().st_size > 500:
+        out.replace(f)
+        tmp.unlink(missing_ok=True)
+    else:
+        out.unlink(missing_ok=True)
+        tmp.replace(f)
+
+
 async def one(sem, text, vname, folder, total):
     global done
     f = folder / vname / (tid(text) + ".mp3")
@@ -52,7 +71,7 @@ async def one(sem, text, vname, folder, total):
             try:
                 tmp = f.with_suffix(".tmp")
                 await edge_tts.Communicate(SAY.get(text, text), VOICES[vname], rate=RATE).save(str(tmp))
-                tmp.replace(f)
+                await compress(tmp, f)
                 break
             except Exception:
                 await asyncio.sleep(2 * (k + 1))
@@ -73,6 +92,9 @@ async def main(mode):
         folder = Path("audio")
         jobs = [(t, v) for t in words for v in WORD_VOICES]
         jobs += [(t, v) for t in ex + phr for v in TEXT_VOICES]
+    for pat in ("*.tmp", "*.part.mp3"):  # хвосты от прерванного запуска
+        for x in folder.rglob(pat):
+            x.unlink()
     sem = asyncio.Semaphore(6)
     await asyncio.gather(*[one(sem, t, v, folder, len(jobs)) for t, v in jobs])
     if mode == "all":
